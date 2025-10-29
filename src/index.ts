@@ -42,181 +42,299 @@ fastify.get('/', async (request, reply) => {
 });
 
 fastify.post('/blocks', async (request, reply) => {
-  const block = request.body as Block;
+  try {
+    const block = request.body as Block;
 
-/*
- Checks if the block height is valid
- */
-if(currentHeight === 0) {
-    if(block.height !== 1) {
-        return reply.status(400).send({ 
-            error: 'First block must have height = 1' 
+    /*
+     Checks if the block height is valid
+     */
+    if (currentHeight === 0) {
+      if (block.height !== 1) {
+        return reply.status(400).send({
+          error: 'First block must have height = 1'
         });
-    }
-} else {
-    if(block.height !== currentHeight + 1) {
-        return reply.status(400).send({ 
-            error: `Invalid block height` 
+      }
+    } else {
+      if (block.height !== currentHeight + 1) {
+        return reply.status(400).send({
+          error: `Invalid block height`
         });
-    }
-}
-
-  /*
-  Validation: - each input must reference a valid unspent output (UTXO)
-  */
-  for (const transaction of block.transactions) {
-    let sumInputs = 0;
-    let sumOutputs = 0;
-
-    for (const input of transaction.inputs) {
-      const utxoKey = `${input.txId}:${input.index}`;
-      const utxo = utxos.get(utxoKey);
-
-      if (!utxo) {
-        return reply.status(400).send({ error: `Input not found: ${utxoKey}` });
       }
-
-      sumInputs += utxo.value;
     }
 
-    for (const output of transaction.outputs) {
-      sumOutputs += output.value;
-    }
+    /*
+    Validation: - each input must reference a valid unspent output (UTXO)
+    */
+    for (const transaction of block.transactions) {
+      let sumInputs = 0;
+      let sumOutputs = 0;
 
-    if (sumInputs !== sumOutputs && transaction.inputs.length > 0) {
-      return reply.status(400).send({ error: 'Input and output values do not match' });
-    }
-  }
-
-  let dataToHash = block.height.toString();
-  for (const transaction of block.transactions) {
-    dataToHash += transaction.id;
-  }
-  const expectedBlockId = createHash('sha256').update(dataToHash).digest('hex'); // height + transaction IDs
-
- if (block.id !== expectedBlockId) {
-  return reply.status(400).send({ 
-    error: 'Invalid block id',
-    expected: expectedBlockId,
-    received: block.id,
-    hashInput: dataToHash,
-  });
-}
-  for (const transaction of block.transactions) {
-    // Removes spent UTXOs
-    for (const input of transaction.inputs) {
-      const utxoKey = `${input.txId}:${input.index}`;
-      const utxo = utxos.get(utxoKey);
-      
-      if (utxo) {
-        balances[utxo.address] = (balances[utxo.address] || 0) - utxo.value; // Update balance - decrease
-      }
-      
-      utxos.delete(utxoKey);
-    }
-
-    
-    transaction.outputs.forEach((output, index) => {
-      const utxoKey = `${transaction.id}:${index}`;
-      utxos.set(utxoKey, output);
-      
-      
-      balances[output.address] = (balances[output.address] || 0) + output.value; // Update balance - increase
-    });
-  }
-
-  blocks.push(block);
-  currentHeight = block.height;
-  
-  return { status: 'Block accepted', height: currentHeight };
-
-}
-);
-
-fastify.get('/balance/:address', async (request, reply) => {
-  const params = request.params as { address: string };
-  const address = params.address;
-  const balance = balances[address] || 0; // if address not found, balance is 0
-  return { address, balance };
-
-}
-);
-
-fastify.post('/rollback', async (request, reply) => {
-  const targetHeight = Number((request.query as any)?.height);
-
-  //
-  if (!Number.isFinite(targetHeight) || targetHeight < 1) {
-    return reply.status(400).send({ error: 'Invalid height parameter' });
-  }
-
-  if (targetHeight > currentHeight) {
-    return reply.status(400).send({ error: 'Target height cannot be greater than current height'});
-  }
-
-  const keptBlocks = blocks.filter(b => b.height <= targetHeight);
-
-  // Rebuild UTXO set and balances from kept blocks
-  const rebuiltUtxos: Map<string, Output> = new Map();
-  const rebuiltBalances: Record<string, number> = {};
-
-  for (const block of keptBlocks) {
-    for (const tx of block.transactions) {
-      // Delete spent inputs
-      for (const input of tx.inputs) {
+      for (const input of transaction.inputs) {
         const utxoKey = `${input.txId}:${input.index}`;
-        const utxo = rebuiltUtxos.get(utxoKey);
-        if (utxo) {
-          rebuiltBalances[utxo.address] = (rebuiltBalances[utxo.address] || 0) - utxo.value;
-          rebuiltUtxos.delete(utxoKey);
+        const utxo = utxos.get(utxoKey);
+
+        if (!utxo) {
+          return reply.status(400).send({ error: `Input not found: ${utxoKey}` });
         }
+
+        sumInputs += utxo.value;
       }
 
-      // Create new outputs
-      tx.outputs.forEach((output, idx) => {
-        const utxoKey = `${tx.id}:${idx}`;
-        rebuiltUtxos.set(utxoKey, output);
-        rebuiltBalances[output.address] = (rebuiltBalances[output.address] || 0) + output.value;
+      for (const output of transaction.outputs) {
+        sumOutputs += output.value;
+      }
+
+      if (sumInputs !== sumOutputs && transaction.inputs.length > 0) {
+        return reply.status(400).send({ error: 'Input and output values do not match' });
+      }
+    }
+
+    let dataToHash = block.height.toString();
+    for (const transaction of block.transactions) {
+      dataToHash += transaction.id;
+    }
+    const expectedBlockId = createHash('sha256').update(dataToHash).digest('hex'); // height + transaction IDs
+
+    if (block.id !== expectedBlockId) {
+      return reply.status(400).send({
+        error: 'Invalid block id',
+        expected: expectedBlockId,
+        received: block.id,
+        hashInput: dataToHash,
       });
     }
+
+    if (!dbPool) {
+      return reply.status(500).send({ error: 'Database not initialized' });
+    }
+
+    await dbPool.query(
+      'INSERT INTO blocks (id, height) VALUES ($1, $2)',
+      [block.id, block.height]
+    );
+
+    for (const tx of block.transactions) {
+      await dbPool.query(
+        'INSERT INTO transactions (id, block_id) VALUES ($1, $2)',
+        [tx.id, block.id]
+      );
+
+
+      for (const input of tx.inputs) {
+        await dbPool.query(
+          'INSERT INTO inputs (tx_id, spent_utxo_txid, spent_utxo_index) VALUES ($1, $2, $3)',
+          [tx.id, input.txId, input.index]
+        );
+
+        await dbPool.query(
+          'UPDATE outputs SET is_spent = TRUE WHERE txid = $1 AND idx = $2',
+          [input.txId, input.index]
+        );
+      }
+
+      for (let idx = 0; idx < tx.outputs.length; idx++) {
+        const output = tx.outputs[idx];
+        await dbPool.query(
+          'INSERT INTO outputs (txid, idx, address, value, is_spent) VALUES ($1, $2, $3, $4, $5)',
+          [tx.id, idx, output.address, output.value, false]
+        );
+      }
+    }
+
+    for (const transaction of block.transactions) {
+      // Removes spent UTXOs
+      for (const input of transaction.inputs) {
+        const utxoKey = `${input.txId}:${input.index}`;
+        const utxo = utxos.get(utxoKey);
+
+        if (utxo) {
+          balances[utxo.address] = (balances[utxo.address] || 0) - utxo.value; // Update balance - decrease
+        }
+
+        utxos.delete(utxoKey);
+      }
+
+      transaction.outputs.forEach((output, index) => {
+        const utxoKey = `${transaction.id}:${index}`;
+        utxos.set(utxoKey, output);
+
+        balances[output.address] = (balances[output.address] || 0) + output.value; // Update balance - increase
+      });
+    }
+
+    // update balances in database
+    for (const [address, balance] of Object.entries(balances)) {
+      await dbPool.query(
+        `INSERT INTO balances (address, balance) VALUES ($1, $2) 
+         ON CONFLICT (address) DO UPDATE SET balance = $2, last_updated = NOW()`,
+        [address, balance]
+      );
+    }
+
+    blocks.push(block);
+    currentHeight = block.height;
+
+    return { status: 'Block accepted', height: currentHeight };
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ error: 'Database error', details: String(error) });
   }
+});
 
-  // Change global state to rebuilt state
-  Object.keys(balances).forEach(k => delete balances[k]);
-  Object.assign(balances, rebuiltBalances);
+fastify.get('/balance/:address', async (request, reply) => {
+  try {
+    const params = request.params as { address: string };
+    const address = params.address;
 
-  utxos.clear();
-  for (const [k, v] of rebuiltUtxos) utxos.set(k, v);
+    if (!dbPool) {
+      return reply.status(500).send({ error: 'Database not initialized' });
+    }
 
-  blocks.length = 0;
-  blocks.push(...keptBlocks);
+    // take balance from database
+    const result = await dbPool.query(
+      'SELECT balance FROM balances WHERE address = $1',
+      [address]
+    );
 
-  currentHeight = targetHeight;
+    const balance = result.rows.length > 0 ? result.rows[0].balance : 0;
+    return { address, balance };
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ error: 'Database error', details: String(error) });
+  }
+});
 
-  return { status: 'Rollback successful', height: currentHeight };
-})
+fastify.post('/rollback', async (request, reply) => {
+  try {
+    const targetHeight = Number((request.query as any)?.height);
+
+    if (!Number.isFinite(targetHeight) || targetHeight < 1) {
+      return reply.status(400).send({ error: 'Invalid height parameter' });
+    }
+
+    if (targetHeight > currentHeight) {
+      return reply.status(400).send({ error: 'Target height cannot be greater than current height' });
+    }
+
+    if (!dbPool) {
+      return reply.status(500).send({ error: 'Database not initialized' });
+    }
+
+    // delete blocks above targetHeight
+    await dbPool.query(
+      'DELETE FROM blocks WHERE height > $1',
+      [targetHeight]
+    );
+
+    // rebiuld balances
+    const result = await dbPool.query(`
+      SELECT address, COALESCE(SUM(value), 0) as balance
+      FROM outputs
+      WHERE is_spent = FALSE
+      GROUP BY address
+    `);
+
+    // Delete existing balances
+    await dbPool.query('DELETE FROM balances');
+
+    const newBalances: Record<string, number> = {};
+    for (const row of result.rows) {
+      await dbPool.query(
+        'INSERT INTO balances (address, balance) VALUES ($1, $2)',
+        [row.address, row.balance]
+      );
+      newBalances[row.address] = row.balance;
+    }
+
+    // rebuild in-memory structures
+    const keptBlocks = blocks.filter(b => b.height <= targetHeight);
+
+    const rebuiltUtxos: Map<string, Output> = new Map();
+    const rebuiltBalances: Record<string, number> = {};
+
+    for (const block of keptBlocks) {
+      for (const tx of block.transactions) {
+        for (const input of tx.inputs) {
+          const utxoKey = `${input.txId}:${input.index}`;
+          const utxo = rebuiltUtxos.get(utxoKey);
+          if (utxo) {
+            rebuiltBalances[utxo.address] = (rebuiltBalances[utxo.address] || 0) - utxo.value;
+            rebuiltUtxos.delete(utxoKey);
+          }
+        }
+
+        tx.outputs.forEach((output, idx) => {
+          const utxoKey = `${tx.id}:${idx}`;
+          rebuiltUtxos.set(utxoKey, output);
+          rebuiltBalances[output.address] = (rebuiltBalances[output.address] || 0) + output.value;
+        });
+      }
+    }
+
+    // Change in-memory structures to rebuilt ones
+    Object.keys(balances).forEach(k => delete balances[k]);
+    Object.assign(balances, rebuiltBalances);
+
+    utxos.clear();
+    for (const [k, v] of rebuiltUtxos) utxos.set(k, v);
+
+    blocks.length = 0;
+    blocks.push(...keptBlocks);
+
+    currentHeight = targetHeight;
+
+    return { status: 'Rollback successful', height: currentHeight };
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ error: 'Rollback failed', details: String(error) });
+  }
+});
 
 fastify.post('/reset', async (request, reply) => {
-  blocks.length = 0;
-  currentHeight = 0;
-  Object.keys(balances).forEach(key => delete balances[key]);
-  utxos.clear();
-  
-  return { 
-    status: 'Reset successful',
-    currentHeight,
-    blocksCount: blocks.length,
-    utxosCount: utxos.size,
-    balancesCount: Object.keys(balances).length
-  };
+  try {
+    if (!dbPool) {
+      return reply.status(500).send({ error: 'Database not initialized' });
+    }
+
+    await dbPool.query('DELETE FROM blocks');
+    await dbPool.query('DELETE FROM balances');
+
+    blocks.length = 0;
+    currentHeight = 0;
+    Object.keys(balances).forEach(key => delete balances[key]);
+    utxos.clear();
+
+    return {
+      status: 'Reset successful',
+      currentHeight,
+      blocksCount: blocks.length,
+      utxosCount: utxos.size,
+      balancesCount: Object.keys(balances).length
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ error: 'Reset failed', details: String(error) });
+  }
 });
 
 fastify.get('/blocks', async (request, reply) => {
-  return {
-    blocks: blocks,
-    count: blocks.length,
-    currentHeight: currentHeight
-  };
+  try {
+    if (!dbPool) {
+      return reply.status(500).send({ error: 'Database not initialized' });
+    }
+    const result = await dbPool.query(
+      'SELECT id, height FROM blocks ORDER BY height'
+    );
+
+    return {
+      blocks: result.rows,
+      count: result.rows.length,
+      currentHeight: currentHeight
+    };
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ error: 'Database error', details: String(error) });
+  }
 });
 
 async function createTables(pool: Pool) {
