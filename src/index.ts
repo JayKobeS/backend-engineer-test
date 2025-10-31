@@ -220,13 +220,56 @@ fastify.post('/rollback', async (request, reply) => {
       return reply.status(500).send({ error: 'Database not initialized' });
     }
 
-    // delete blocks above targetHeight
+    // First, get all transactions that will be deleted (height > targetHeight)
+    const deletedTxsResult = await dbPool.query(`
+      SELECT t.id
+      FROM transactions t
+      JOIN blocks b ON t.block_id = b.id
+      WHERE b.height > $1
+    `, [targetHeight]);
+
+    const deletedTxIds = deletedTxsResult.rows.map((row: any) => row.id);
+
+    // Step 1: Reset all outputs that were marked as spent by deleted transactions back to unspent
+    // These outputs were created BEFORE the deleted blocks
+    if (deletedTxIds.length > 0) {
+      const placeholders = deletedTxIds.map((_: any, i: number) => `$${i + 1}`).join(',');
+      await dbPool.query(`
+        UPDATE outputs 
+        SET is_spent = FALSE 
+        WHERE (txid, idx) IN (
+          SELECT spent_utxo_txid, spent_utxo_index
+          FROM inputs
+          WHERE tx_id IN (${placeholders})
+        )
+      `, deletedTxIds);
+    }
+
+    // Step 2: Delete all outputs that were created by deleted transactions
+    if (deletedTxIds.length > 0) {
+      const placeholders = deletedTxIds.map((_: any, i: number) => `$${i + 1}`).join(',');
+      await dbPool.query(`
+        DELETE FROM outputs
+        WHERE txid IN (${placeholders})
+      `, deletedTxIds);
+    }
+
+    // Step 3: Delete blocks above targetHeight (cascades to transactions)
     await dbPool.query(
       'DELETE FROM blocks WHERE height > $1',
       [targetHeight]
     );
 
-    // rebiuld balances
+    // Step 4: Delete inputs from deleted transactions (not strictly needed with CASCADE but being explicit)
+    if (deletedTxIds.length > 0) {
+      const placeholders = deletedTxIds.map((_: any, i: number) => `$${i + 1}`).join(',');
+      await dbPool.query(`
+        DELETE FROM inputs
+        WHERE tx_id IN (${placeholders})
+      `, deletedTxIds);
+    }
+
+    // rebuild balances
     const result = await dbPool.query(`
       SELECT address, COALESCE(SUM(value), 0) as balance
       FROM outputs
@@ -296,6 +339,10 @@ fastify.post('/reset', async (request, reply) => {
       return reply.status(500).send({ error: 'Database not initialized' });
     }
 
+    // Delete in correct order to avoid FK conflicts
+    await dbPool.query('DELETE FROM outputs');
+    await dbPool.query('DELETE FROM inputs');
+    await dbPool.query('DELETE FROM transactions');
     await dbPool.query('DELETE FROM blocks');
     await dbPool.query('DELETE FROM balances');
 
