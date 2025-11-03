@@ -333,6 +333,7 @@ fastify.post('/rollback', async (request, reply) => {
   }
 });
 
+// this is extra reset endpoint, which is useful for tests
 fastify.post('/reset', async (request, reply) => {
   try {
     if (!dbPool) {
@@ -363,6 +364,7 @@ fastify.post('/reset', async (request, reply) => {
     return reply.status(500).send({ error: 'Reset failed', details: String(error) });
   }
 });
+
 
 fastify.get('/blocks', async (request, reply) => {
   try {
