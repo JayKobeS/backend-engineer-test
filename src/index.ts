@@ -32,7 +32,6 @@ const balances: Record<string, number> = {}; // address , balance
 
 const utxos: Map<string, Output> = new Map(); // key: `${txId}:${index}`
 
-// Database pool - będzie ustawiony w bootstrap()
 let dbPool: Pool | null = null;
 
 
@@ -220,7 +219,6 @@ fastify.post('/rollback', async (request, reply) => {
       return reply.status(500).send({ error: 'Database not initialized' });
     }
 
-    // First, get all transactions that will be deleted (height > targetHeight)
     const deletedTxsResult = await dbPool.query(`
       SELECT t.id
       FROM transactions t
@@ -230,7 +228,6 @@ fastify.post('/rollback', async (request, reply) => {
 
     const deletedTxIds = deletedTxsResult.rows.map((row: any) => row.id);
 
-    // Step 1: Reset all outputs that were marked as spent by deleted transactions back to unspent
     // These outputs were created BEFORE the deleted blocks
     if (deletedTxIds.length > 0) {
       const placeholders = deletedTxIds.map((_: any, i: number) => `$${i + 1}`).join(',');
@@ -245,7 +242,6 @@ fastify.post('/rollback', async (request, reply) => {
       `, deletedTxIds);
     }
 
-    // Step 2: Delete all outputs that were created by deleted transactions
     if (deletedTxIds.length > 0) {
       const placeholders = deletedTxIds.map((_: any, i: number) => `$${i + 1}`).join(',');
       await dbPool.query(`
@@ -254,13 +250,11 @@ fastify.post('/rollback', async (request, reply) => {
       `, deletedTxIds);
     }
 
-    // Step 3: Delete blocks above targetHeight (cascades to transactions)
     await dbPool.query(
       'DELETE FROM blocks WHERE height > $1',
       [targetHeight]
     );
 
-    // Step 4: Delete inputs from deleted transactions (not strictly needed with CASCADE but being explicit)
     if (deletedTxIds.length > 0) {
       const placeholders = deletedTxIds.map((_: any, i: number) => `$${i + 1}`).join(',');
       await dbPool.query(`
@@ -333,7 +327,11 @@ fastify.post('/rollback', async (request, reply) => {
   }
 });
 
-// this is extra reset endpoint, which is useful for tests
+/* 
+
+ this is extra reset endpoint, which is useful for tests
+
+*/
 fastify.post('/reset', async (request, reply) => {
   try {
     if (!dbPool) {
@@ -449,7 +447,6 @@ async function bootstrap() {
 
   await createTables(pool);
   
-  // Przechowujemy pool globalnie
   dbPool = pool;
   console.log('Database connected and tables created');
 }
